@@ -35,7 +35,7 @@
 #endif
 
 #define B2XX_CLK_RT      26e6
-#define B2XX_MC_CLK_RT   (5.6e6 * 4)
+#define B2XX_MC_CLK_RT   (20e6)
 #define E1XX_CLK_RT      52e6
 #define B100_BASE_RT     400000
 #define USRP2_BASE_RT    390625
@@ -192,7 +192,7 @@ static double select_rate(uhd_dev_type dev, size_t sps,
 		switch (dev) {
 		case B200:
 		case B210:
-			return 7 * GSM_CHAN_SPACING;
+			return 2.5e6;
 		default:
 			LOG(ALERT) << "Invalid device combination";
 			return -9999.99;

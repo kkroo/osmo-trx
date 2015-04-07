@@ -172,12 +172,17 @@ private:
 
   signalVector *outerSendBuffer;
   signalVector *outerRecvBuffer;
-  std::vector<signalVector *> history;
+  signalVector *outerOuterSendBuffer;
+  signalVector *outerOuterRecvBuffer;
+  std::vector<signalVector *> history0;
+  signalVector * history1;
   std::vector<bool> active;
 
-  Resampler *dnsampler;
-  Resampler *upsampler;
+  Resampler *dnsampler0;
+  Resampler *upsampler0;
   Channelizer *channelizer;
+  Resampler *dnsampler1;
+  Resampler *upsampler1;
   Synthesis *synthesis;
 
 public:

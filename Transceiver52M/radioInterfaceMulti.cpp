@@ -29,13 +29,16 @@ extern "C" {
 #include "convert.h"
 }
 
-/* Resampling parameters for 64 MHz clocking */
+/* Resampling parameters for 270.833 kHz / 400 kHz */
 #define RESAMP_64M_INRATE			65
 #define RESAMP_64M_OUTRATE			96
 
+/* Resampling parameters for 2.8 MHz / 2.5 MHz */
+#define RESAMP_100M_INRATE			28
+#define RESAMP_100M_OUTRATE			25
+
 /* Universal resampling parameters */
 #define NUMCHUNKS				24
-
 #define MCHANS					7
 
 static size_t resamp_inrate = 0;
@@ -47,7 +50,10 @@ RadioInterfaceMulti::RadioInterfaceMulti(RadioDevice *wRadio,
 					   size_t sps, size_t chans)
 	: RadioInterface(wRadio, sps, chans),
 	  outerSendBuffer(NULL), outerRecvBuffer(NULL),
-	  dnsampler(NULL), upsampler(NULL), channelizer(NULL), synthesis(NULL)
+	  outerOuterSendBuffer(NULL), outerOuterRecvBuffer(NULL),
+	  dnsampler0(NULL), upsampler0(NULL), channelizer(NULL),
+	  dnsampler1(NULL), upsampler1(NULL), synthesis(NULL),
+	  history1(NULL)
 {
 }
 
@@ -60,21 +66,31 @@ void RadioInterfaceMulti::close()
 {
 	delete outerSendBuffer;
 	delete outerRecvBuffer;
-	delete dnsampler;
-	delete upsampler;
+	delete outerOuterSendBuffer;
+	delete outerOuterRecvBuffer;
+	delete dnsampler0;
+	delete upsampler0;
+	delete dnsampler1;
+	delete upsampler1;
 	delete channelizer;
 	delete synthesis;
+	delete history1;
 
 	outerSendBuffer = NULL;
 	outerRecvBuffer = NULL;
-	dnsampler = NULL;
-	upsampler = NULL;
+	outerOuterSendBuffer = NULL;
+	outerOuterRecvBuffer = NULL;
+	dnsampler0 = NULL;
+	upsampler0 = NULL;
+	dnsampler1 = NULL;
+	upsampler1 = NULL;
 	channelizer = NULL;
 	synthesis = NULL;
+	history1 = NULL;
 
 	mReceiveFIFO.resize(0);
 	powerScaling.resize(0);
-	history.resize(0);
+	history0.resize(0);
 	active.resize(0);
 
 	RadioInterface::close();
@@ -155,7 +171,7 @@ bool RadioInterfaceMulti::init(int type)
 
 	mReceiveFIFO.resize(mChans);
 	powerScaling.resize(mChans);
-	history.resize(mChans);
+	history0.resize(mChans);
 	active.resize(MCHANS);
 
 	resamp_inrate = RESAMP_64M_INRATE;
@@ -169,14 +185,26 @@ bool RadioInterfaceMulti::init(int type)
 		return false;
 	}
 
-	dnsampler = new Resampler(resamp_inrate, resamp_outrate);
-	if (!dnsampler->init(1.0)) {
+	dnsampler0 = new Resampler(resamp_inrate, resamp_outrate);
+	if (!dnsampler0->init(1.0)) {
 		LOG(ALERT) << "Rx resampler failed to initialize";
 		return false;
 	}
 
-	upsampler = new Resampler(resamp_outrate, resamp_inrate * mSPSTx);
-	if (!upsampler->init(cutoff)) {
+	upsampler0 = new Resampler(resamp_outrate, resamp_inrate * mSPSTx);
+	if (!upsampler0->init(cutoff)) {
+		LOG(ALERT) << "Tx resampler failed to initialize";
+		return false;
+	}
+
+	dnsampler1 = new Resampler(RESAMP_100M_INRATE, RESAMP_100M_OUTRATE);
+	if (!dnsampler1->init(1.0)) {
+		LOG(ALERT) << "Rx resampler failed to initialize";
+		return false;
+	}
+
+	upsampler1 = new Resampler(RESAMP_100M_OUTRATE, RESAMP_100M_INRATE);
+	if (!upsampler1->init(1.0)) {
 		LOG(ALERT) << "Tx resampler failed to initialize";
 		return false;
 	}
@@ -201,20 +229,24 @@ bool RadioInterfaceMulti::init(int type)
 	 */
 	for (size_t i = 0; i < mChans; i++) {
 		sendBuffer[i] = new RadioBuffer(NUMCHUNKS, inchunk * mSPSTx,
-					        upsampler->len(), true);
+					        upsampler0->len(), true);
 		recvBuffer[i] = new RadioBuffer(NUMCHUNKS, inchunk,
 		                                0, false);
-		history[i] = new signalVector(dnsampler->len());
+		history0[i] = new signalVector(dnsampler0->len());
 
 		active[i] = false;
 		synthesis->resetBuffer(i);
 	}
 
+	history1 = new signalVector(dnsampler1->len());
+
 	outerSendBuffer = new signalVector(synthesis->outputLen());
 	outerRecvBuffer = new signalVector(channelizer->inputLen());
+	outerOuterSendBuffer = new signalVector(2400);
+	outerOuterRecvBuffer = new signalVector(2400);
 
-	convertSendBuffer[0] = new short[2 * synthesis->outputLen()];
-	convertRecvBuffer[0] = new short[2 * channelizer->inputLen()];
+	convertSendBuffer[0] = new short[2 * 2400];
+	convertRecvBuffer[0] = new short[2 * 2400];
 
 	/* Configure channels */
 	switch (mChans) {
@@ -253,20 +285,26 @@ void RadioInterfaceMulti::pullBuffer()
 
 	/* Outer buffer access size is fixed */
 	num = mRadio->readSamples(convertRecvBuffer,
-				  outerRecvBuffer->size(),
+				  outerOuterRecvBuffer->size(),
 				  &overrun,
 				  readTimestamp,
 				  &local_underrun);
-	if (num != channelizer->inputLen()) {
+	if (num != outerOuterRecvBuffer->size()) {
 		LOG(ALERT) << "Receive error " << num << ", " << channelizer->inputLen();
 		return;
 	}
 
-	convert_short_float((float *) outerRecvBuffer->begin(),
-			    convertRecvBuffer[0], 2 * outerRecvBuffer->size());
+	convert_short_float((float *) outerOuterRecvBuffer->begin(),
+			    convertRecvBuffer[0],
+			    outerOuterRecvBuffer->size() * 2);
 
 	underrun |= local_underrun;
 	readTimestamp += num;
+
+	dnsampler1->rotate((float *) outerOuterRecvBuffer->begin(),
+			   outerOuterRecvBuffer->size(),
+			   (float *) outerRecvBuffer->begin(),
+			   outerRecvBuffer->size());
 
 	channelizer->rotate((float *) outerRecvBuffer->begin(),
 			    outerRecvBuffer->size());
@@ -284,17 +322,17 @@ void RadioInterfaceMulti::pullBuffer()
 		/* Update history */
 		buf = channelizer->outputBuffer(i);
 		size_t cLen = channelizer->outputLen();
-		size_t hLen = dnsampler->len();
+		size_t hLen = dnsampler0->len();
 		size_t hSize = 2 * hLen * sizeof(float);
 
-		memcpy(&buf[2 * -hLen], history[lchan]->begin(), hSize);
-		memcpy(history[lchan]->begin(), &buf[2 * (cLen - hLen)], hSize);
+		memcpy(&buf[2 * -hLen], history0[lchan]->begin(), hSize);
+		memcpy(history0[lchan]->begin(), &buf[2 * (cLen - hLen)], hSize);
 
 		/* Write to the end of the inner receive buffer */
-		if (!dnsampler->rotate(channelizer->outputBuffer(i),
-				       channelizer->outputLen(),
-				       recvBuffer[lchan]->getWriteSegment(),
-				       recvBuffer[lchan]->getSegmentLen())) {
+		if (!dnsampler0->rotate(channelizer->outputBuffer(i),
+					channelizer->outputLen(),
+					recvBuffer[lchan]->getWriteSegment(),
+					recvBuffer[lchan]->getSegmentLen())) {
 			LOG(ALERT) << "Sample rate upsampling error";
 		}
 	}
@@ -314,10 +352,10 @@ bool RadioInterfaceMulti::pushBuffer()
 
 		int lchan = getLogicalChan(i, mChans);
 
-		if (!upsampler->rotate(sendBuffer[lchan]->getReadSegment(),
-				       sendBuffer[lchan]->getSegmentLen(),
-				       synthesis->inputBuffer(i),
-				       synthesis->inputLen())) {
+		if (!upsampler0->rotate(sendBuffer[lchan]->getReadSegment(),
+				        sendBuffer[lchan]->getSegmentLen(),
+				        synthesis->inputBuffer(i),
+				        synthesis->inputLen())) {
 			LOG(ALERT) << "Sample rate downsampling error";
 		}
 	}
@@ -325,15 +363,21 @@ bool RadioInterfaceMulti::pushBuffer()
 	synthesis->rotate((float *) outerSendBuffer->begin(),
 			  outerSendBuffer->size());
 
+	upsampler1->rotate((float *) outerSendBuffer->begin(),
+			   outerSendBuffer->size(),
+			   (float *) outerOuterSendBuffer->begin(),
+			   outerOuterSendBuffer->size());
+
 	convert_float_short(convertSendBuffer[0],
-			    (float *) outerSendBuffer->begin(),
-			    1.0 / (float) mChans, 2 * outerSendBuffer->size());
+			    (float *) outerOuterSendBuffer->begin(),
+			    1.0 / (float) mChans,
+			    outerOuterSendBuffer->size() * 2);
 
 	size_t num = mRadio->writeSamples(convertSendBuffer,
-					  outerSendBuffer->size(),
+					  outerOuterSendBuffer->size(),
 					  &underrun,
 					  writeTimestamp);
-	if (num != outerSendBuffer->size()) {
+	if (num != outerOuterSendBuffer->size()) {
 		LOG(ALERT) << "Transmit error " << num;
 	}
 
