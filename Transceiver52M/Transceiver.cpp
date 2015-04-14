@@ -195,7 +195,8 @@ bool Transceiver::init(bool filler)
  *
  * Submit command(s) to the radio device to commence streaming samples and
  * launch threads to handle sample I/O. Re-synchronize the transmit burst
- * counters to the central radio clock here as well.
+ * counters to the central radio clock here as well. Starting a running instance
+ * has no effect and is not an error condition.
  */
 bool Transceiver::start()
 {
@@ -203,7 +204,7 @@ bool Transceiver::start()
 
   if (mOn) {
     LOG(ERR) << "Transceiver already running";
-    return false;
+    return true;
   }
 
   LOG(NOTICE) << "Starting the transceiver";
@@ -251,15 +252,22 @@ bool Transceiver::start()
  * requests to running threads. Most threads will timeout and terminate once
  * device is disabled, but the transmit loop may block waiting on the central
  * UMTS clock. Explicitly signal the clock to make sure that the transmit loop
- * makes it to the thread cancellation point.
+ * makes it to the thread cancellation point. Stopping a stopped instance is
+ * not disallowed and has no effect.
+ *
+ * Specific to USRP1, disable stopping because control path hangs on stoppage
+ * of receive flow in the GNU Radio driver, which is a no-fix condition.
  */
-void Transceiver::stop()
+bool Transceiver::stop()
 {
   ScopedLock lock(mLock);
 
   if (!mOn)
-    return;
+    return true;
 
+#ifndef USE_UHD
+  return false;
+#else
   LOG(NOTICE) << "Stopping the transceiver";
   mTxLowerLoopThread->cancel();
   mRxLowerLoopThread->cancel();
@@ -288,6 +296,9 @@ void Transceiver::stop()
 
   mOn = false;
   LOG(NOTICE) << "Transceiver stopped";
+
+  return true;
+#endif
 }
 
 void Transceiver::addRadioVector(size_t chan, BitVector &bits,
@@ -675,8 +686,10 @@ void Transceiver::driveControl(size_t chan)
   LOG(INFO) << "command is " << buffer;
 
   if (strcmp(command,"POWEROFF")==0) {
-    stop();
-    sprintf(response,"RSP POWEROFF 0");
+    if (chan || !stop())
+      sprintf(response,"RSP POWEROFF 1");
+    else
+      sprintf(response,"RSP POWEROFF 0");
   }
   else if (strcmp(command,"POWERON")==0) {
     if (!start())

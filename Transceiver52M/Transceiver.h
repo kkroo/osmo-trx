@@ -175,7 +175,7 @@ private:
 
   /** Start and stop I/O threads through the control socket API */
   bool start();
-  void stop();
+  bool stop();
 
   /** Protect destructor accessable stop call */
   Mutex mLock;
